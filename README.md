@@ -4,14 +4,6 @@ Writing tool with a single input area and a visible countdown. If you let the ti
 
 After installing use `tdt --help` for some help.
 
-## Run
-Run it once without installing:
-
-```sh
-uv run python main.py
-uv run tdt # or like this
-```
-
 ## Install
 Install the `tdt` command into your terminal with [uv](https://docs.astral.sh/uv/):
 
@@ -20,12 +12,13 @@ uv tool install .
 # uv tool uninstall tdt
 ```
 
-After that, you can launch it from anywhere with:
+## Run
+After installing, you can launch it from anywhere with:
 
 ```sh
 tdt
-tdt --no-review
-tdt -d 2.5
+# tdt --no-review
+# tdt -d 2.5
 ```
 
 ## Piping
