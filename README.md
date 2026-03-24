@@ -2,6 +2,8 @@
 
 Writing tool with a single input area and a visible countdown. If you let the timer run out your text disappears. When you're done, press `ESC` to go to the review. Press `ESC` again to exit. If you want to save the text, pipe it into a file with `tdt > test.txt` or press `c` in review to save it to the clipboard.
 
+This is great for quick brainstorming, dumping ideas or screaming into the void.
+
 After installing use `tdt --help` for some help.
 
 ## Install
@@ -24,8 +26,6 @@ tdt
 ## Piping
 
 Pipe or redirect the final review text:
-
-Examples:
 
 ```bash
 tdt > test.txt
