@@ -45,7 +45,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 class ReviewTextArea(TextArea):
     BINDINGS = [
         ("enter", "restart_session", "Restart"),
-        ("y", "copy_session_y", "Copy"),
         ("c", "copy_session_c", "Copy"),
         ("j", "scroll_down", "Down"),
         ("k", "scroll_up", "Up"),
@@ -240,12 +239,15 @@ class TypeDontThinkTUI(App[None]):
     def _refresh_status(self) -> None:
         title = self.query_one("#title", Static)
         if self.in_review_mode:
+            word_count = self._get_word_count(self._get_review_text())
             title.update(
                 "Type Don't Think"
                 " | "
                 "review"
                 " | "
                 f"{self._format_elapsed_time(self.review_elapsed_ms)}"
+                " | "
+                f"{word_count} words"
             )
             return
 
@@ -280,6 +282,9 @@ class TypeDontThinkTUI(App[None]):
         if hours:
             return f"{hours}:{minutes:02d}:{seconds:02d}"
         return f"{minutes:02d}:{seconds:02d}"
+
+    def _get_word_count(self, text: str) -> int:
+        return len(text.split())
 
     def copy_session_to_clipboard(self) -> None:
         text = self._get_review_text()
