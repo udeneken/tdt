@@ -11,7 +11,7 @@ from textual.widgets import Footer, Static, TextArea
 
 
 DEFAULT_DELAY_SECONDS = 1.0
-CHECK_INTERVAL_MS = 250
+CHECK_INTERVAL_MS = 100
 
 
 def positive_float(value: str) -> float:
