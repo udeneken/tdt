@@ -69,7 +69,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 class ReviewTextArea(TextArea):
     BINDINGS = [
         ("enter", "restart_session", "Restart"),
-        ("c", "copy_session_c", "Copy"),
+        ("c", "copy_session", "Copy"),
         ("j", "scroll_down", "Down"),
         ("k", "scroll_up", "Up"),
     ]
@@ -82,10 +82,7 @@ class ReviewTextArea(TextArea):
             return
         await super()._on_key(event)
 
-    def action_copy_session_y(self) -> None:
-        self.app.copy_session_to_clipboard()
-
-    def action_copy_session_c(self) -> None:
+    def action_copy_session(self) -> None:
         self.app.copy_session_to_clipboard()
 
     def action_scroll_down(self) -> None:
@@ -179,7 +176,13 @@ class TypeDontThinkTUI(App[None]):
         self.review_elapsed_ms = 0
         self.saved_blocks: list[str] = []
         self.current_text = ""
+        self.review_text = ""
+        self.review_word_count = 0
         self.in_review_mode = False
+        self._last_status_text = ""
+        self.title_widget: Static | None = None
+        self.editor: InputTextArea | None = None
+        self.review: ReviewTextArea | None = None
 
     def compose(self) -> ComposeResult:
         with Vertical(id="root"):
@@ -190,7 +193,10 @@ class TypeDontThinkTUI(App[None]):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.query_one("#editor", InputTextArea).focus()
+        self.title_widget = self.query_one("#title", Static)
+        self.editor = self.query_one("#editor", InputTextArea)
+        self.review = self.query_one("#review", ReviewTextArea)
+        self.editor.focus()
         self.set_interval(CHECK_INTERVAL_MS / 1000, self._tick)
         self._refresh_status()
 
@@ -209,8 +215,7 @@ class TypeDontThinkTUI(App[None]):
 
     def action_handle_escape(self) -> None:
         if self.in_review_mode:
-            self.final_output = self._get_review_text()
-            self.exit()
+            self._exit_review_mode()
             return
 
         if not self.saved_blocks and not self.current_text:
@@ -218,65 +223,49 @@ class TypeDontThinkTUI(App[None]):
             return
 
         if self.no_review:
-            self.final_output = self._get_review_text()
-            self.exit()
+            self._exit_without_review()
             return
 
-        if self.first_input_at is not None:
-            self.review_elapsed_ms = int((monotonic() - self.first_input_at) * 1000)
-
-        self.in_review_mode = True
-        self._refresh_review()
-        self._refresh_status()
-        self.query_one("#editor", TextArea).add_class("hidden")
-        review = self.query_one("#review", ReviewTextArea)
-        review.remove_class("hidden")
-        review.focus()
+        self._enter_review_mode()
 
     def restart_session(self) -> None:
         if not self.in_review_mode:
             return
 
-        self.first_input_at = None
-        self.last_keypress_at = None
-        self.review_elapsed_ms = 0
-        self.saved_blocks.clear()
-        self.current_text = ""
-        self.in_review_mode = False
-        review = self.query_one("#review", ReviewTextArea)
-        review.load_text("")
-        review.add_class("hidden")
-        editor = self.query_one("#editor", InputTextArea)
-        editor.load_text("")
-        editor.remove_class("hidden")
-        editor.focus()
+        self._reset_session_state(clear_saved_blocks=True)
+        assert self.review is not None
+        assert self.editor is not None
+        self.review.load_text("")
+        self.review.add_class("hidden")
+        self.editor.load_text("")
+        self.editor.remove_class("hidden")
+        self.editor.focus()
         self._refresh_status()
 
     def _tick(self) -> None:
         if self.in_review_mode:
-            self._refresh_status()
             return
 
         self._end_sprint_if_needed()
         self._expire_input_if_needed()
-        self._refresh_status()
+        if self.show_time:
+            self._refresh_status()
 
     def _end_sprint_if_needed(self) -> None:
-        if self.sprint_duration_ms is None or self.first_input_at is None:
+        sprint_remaining_ms = self._remaining_sprint_ms()
+        if sprint_remaining_ms is None:
             return
 
-        elapsed_ms = int((monotonic() - self.first_input_at) * 1000)
-        if elapsed_ms < self.sprint_duration_ms:
+        if sprint_remaining_ms > 0:
             return
 
         self.action_handle_escape()
 
     def _expire_input_if_needed(self) -> None:
-        if self.last_keypress_at is None:
+        if self.last_keypress_at is None or not self.current_text.strip():
             return
 
-        elapsed_ms = int((monotonic() - self.last_keypress_at) * 1000)
-        if elapsed_ms < self.delay_ms:
+        if self._remaining_delay_ms() > 0:
             return
 
         self.commit_current_block()
@@ -289,40 +278,40 @@ class TypeDontThinkTUI(App[None]):
         self.saved_blocks.append(self.current_text)
         self.current_text = ""
         self.last_keypress_at = None
-        editor = self.query_one("#editor", TextArea)
-        editor.load_text("")
+        self.review_text = ""
+        self.review_word_count = 0
+        assert self.editor is not None
+        self.editor.load_text("")
+        self._refresh_status()
 
     def _refresh_status(self) -> None:
-        title = self.query_one("#title", Static)
+        status_text: str
         if self.in_review_mode:
-            word_count = self._get_word_count(self._get_review_text())
             status_parts = ["Type Don't Think", "review"]
             status_parts.append(self._format_elapsed_time(self.review_elapsed_ms))
-            status_parts.append(f"{word_count} words")
-            title.update(" | ".join(status_parts))
+            status_parts.append(f"{self.review_word_count} words")
+            status_text = " | ".join(status_parts)
+        else:
+            status_parts = ["Type Don't Think", "input"]
+            if self.show_time:
+                status_parts.append(f"{self._remaining_delay_ms() / 1000:.1f}s")
+                sprint_remaining_ms = self._remaining_sprint_ms()
+                if sprint_remaining_ms is not None:
+                    status_parts.append(f"sprint {self._format_elapsed_time(sprint_remaining_ms)}")
+            status_text = " | ".join(status_parts)
+
+        if status_text == self._last_status_text:
             return
 
-        status_parts = ["Type Don't Think", "input"]
-        if self.last_keypress_at is None or not self.current_text.strip():
-            remaining_ms = self.delay_ms
-        else:
-            elapsed_ms = int((monotonic() - self.last_keypress_at) * 1000)
-            remaining_ms = max(0, self.delay_ms - elapsed_ms)
-
-        if self.show_time:
-            status_parts.append(f"{remaining_ms / 1000:.1f}s")
-        if self.sprint_duration_ms is not None and self.show_time:
-            sprint_remaining_ms = self.sprint_duration_ms
-            if self.first_input_at is not None:
-                elapsed_ms = int((monotonic() - self.first_input_at) * 1000)
-                sprint_remaining_ms = max(0, self.sprint_duration_ms - elapsed_ms)
-            status_parts.append(f"sprint {self._format_elapsed_time(sprint_remaining_ms)}")
-
-        title.update(" | ".join(status_parts))
+        assert self.title_widget is not None
+        self.title_widget.update(status_text)
+        self._last_status_text = status_text
 
     def _refresh_review(self) -> None:
-        review = self.query_one("#review", ReviewTextArea)
-        review.load_text(self._get_review_text())
+        self.review_text = self._get_review_text()
+        self.review_word_count = self._get_word_count(self.review_text)
+        assert self.review is not None
+        self.review.load_text(self.review_text)
 
     def _get_prompt_text(self) -> str:
         return f"Prompt: {self.prompt}" if self.prompt else ""
@@ -332,6 +321,29 @@ class TypeDontThinkTUI(App[None]):
         if self.current_text:
             parts.append(self.current_text)
         return "\n".join(parts)
+
+    def _elapsed_ms_since(self, timestamp: float | None) -> int | None:
+        if timestamp is None:
+            return None
+        return int((monotonic() - timestamp) * 1000)
+
+    def _remaining_delay_ms(self) -> int:
+        if self.last_keypress_at is None or not self.current_text.strip():
+            return self.delay_ms
+
+        elapsed_ms = self._elapsed_ms_since(self.last_keypress_at)
+        assert elapsed_ms is not None
+        return max(0, self.delay_ms - elapsed_ms)
+
+    def _remaining_sprint_ms(self) -> int | None:
+        if self.sprint_duration_ms is None:
+            return None
+        if self.first_input_at is None:
+            return self.sprint_duration_ms
+
+        elapsed_ms = self._elapsed_ms_since(self.first_input_at)
+        assert elapsed_ms is not None
+        return max(0, self.sprint_duration_ms - elapsed_ms)
 
     def _format_elapsed_time(self, elapsed_ms: int) -> str:
         total_seconds = max(0, elapsed_ms // 1000)
@@ -343,6 +355,37 @@ class TypeDontThinkTUI(App[None]):
 
     def _get_word_count(self, text: str) -> int:
         return len(text.split())
+
+    def _reset_session_state(self, *, clear_saved_blocks: bool) -> None:
+        self.first_input_at = None
+        self.last_keypress_at = None
+        self.review_elapsed_ms = 0
+        self.current_text = ""
+        self.review_text = ""
+        self.review_word_count = 0
+        self.in_review_mode = False
+        if clear_saved_blocks:
+            self.saved_blocks.clear()
+
+    def _enter_review_mode(self) -> None:
+        elapsed_ms = self._elapsed_ms_since(self.first_input_at)
+        self.review_elapsed_ms = elapsed_ms if elapsed_ms is not None else 0
+        self.in_review_mode = True
+        self._refresh_review()
+        assert self.editor is not None
+        assert self.review is not None
+        self.editor.add_class("hidden")
+        self.review.remove_class("hidden")
+        self.review.focus()
+        self._refresh_status()
+
+    def _exit_review_mode(self) -> None:
+        self.final_output = self.review_text or self._get_review_text()
+        self.exit()
+
+    def _exit_without_review(self) -> None:
+        self.final_output = self._get_review_text()
+        self.exit()
 
     def copy_session_to_clipboard(self) -> None:
         text = self._get_review_text()
