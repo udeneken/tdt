@@ -21,6 +21,13 @@ def positive_float(value: str) -> float:
     return delay
 
 
+def positive_int(value: str) -> int:
+    minutes = int(value)
+    if minutes <= 0:
+        raise argparse.ArgumentTypeError("minutes must be greater than 0")
+    return minutes
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="tdt",
@@ -38,6 +45,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--no-review",
         action="store_true",
         help="Exit immediately instead of entering review mode.",
+    )
+    parser.add_argument(
+        "-s",
+        "--sprint",
+        type=positive_int,
+        metavar="MINUTES",
+        help="End the session after the given number of minutes.",
+    )
+    parser.add_argument(
+        "-p",
+        "--prompt",
+        help="Show a writing prompt above the editor.",
+    )
+    parser.add_argument(
+        "--show-time",
+        action="store_true",
+        help="Show timer information in the title bar.",
     )
     return parser.parse_args(argv)
 
@@ -100,6 +124,14 @@ class TypeDontThinkTUI(App[None]):
         margin: 0 0 1 0;
     }
 
+    #prompt {
+        margin: 0 0 1 0;
+        padding: 0 1;
+        color: $text-muted;
+        background: $surface;
+        border-left: wide $accent;
+    }
+
     #editor,
     #review {
         width: 100%;
@@ -120,11 +152,23 @@ class TypeDontThinkTUI(App[None]):
         ("escape", "handle_escape", "Review / Quit"),
     ]
 
-    def __init__(self, *, no_review: bool = False, delay_seconds: float = DEFAULT_DELAY_SECONDS) -> None:
+    def __init__(
+        self,
+        *,
+        no_review: bool = False,
+        delay_seconds: float = DEFAULT_DELAY_SECONDS,
+        sprint_minutes: int | None = None,
+        prompt: str | None = None,
+        show_time: bool = False,
+    ) -> None:
         super().__init__()
         self.no_review = no_review
         self.delay_seconds = delay_seconds
         self.delay_ms = int(delay_seconds * 1000)
+        self.sprint_minutes = sprint_minutes
+        self.sprint_duration_ms = sprint_minutes * 60 * 1000 if sprint_minutes is not None else None
+        self.prompt = prompt.strip() if prompt else ""
+        self.show_time = show_time
         if self.no_review:
             self._bindings = self._bindings.copy()
             self._bindings.key_to_bindings["escape"] = []
@@ -140,6 +184,7 @@ class TypeDontThinkTUI(App[None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="root"):
             yield Static("", id="title")
+            yield Static(self._get_prompt_text(), id="prompt", classes="hidden" if not self.prompt else "")
             yield InputTextArea(id="editor")
             yield ReviewTextArea("", id="review", read_only=True, classes="hidden")
         yield Footer()
@@ -212,8 +257,19 @@ class TypeDontThinkTUI(App[None]):
             self._refresh_status()
             return
 
+        self._end_sprint_if_needed()
         self._expire_input_if_needed()
         self._refresh_status()
+
+    def _end_sprint_if_needed(self) -> None:
+        if self.sprint_duration_ms is None or self.first_input_at is None:
+            return
+
+        elapsed_ms = int((monotonic() - self.first_input_at) * 1000)
+        if elapsed_ms < self.sprint_duration_ms:
+            return
+
+        self.action_handle_escape()
 
     def _expire_input_if_needed(self) -> None:
         if self.last_keypress_at is None:
@@ -240,34 +296,36 @@ class TypeDontThinkTUI(App[None]):
         title = self.query_one("#title", Static)
         if self.in_review_mode:
             word_count = self._get_word_count(self._get_review_text())
-            title.update(
-                "Type Don't Think"
-                " | "
-                "review"
-                " | "
-                f"{self._format_elapsed_time(self.review_elapsed_ms)}"
-                " | "
-                f"{word_count} words"
-            )
+            status_parts = ["Type Don't Think", "review"]
+            status_parts.append(self._format_elapsed_time(self.review_elapsed_ms))
+            status_parts.append(f"{word_count} words")
+            title.update(" | ".join(status_parts))
             return
 
+        status_parts = ["Type Don't Think", "input"]
         if self.last_keypress_at is None or not self.current_text.strip():
             remaining_ms = self.delay_ms
         else:
             elapsed_ms = int((monotonic() - self.last_keypress_at) * 1000)
             remaining_ms = max(0, self.delay_ms - elapsed_ms)
 
-        title.update(
-            "Type Don't Think"
-            " | "
-            "input "
-            " | "
-            f"{remaining_ms / 1000:.1f}s"
-        )
+        if self.show_time:
+            status_parts.append(f"{remaining_ms / 1000:.1f}s")
+        if self.sprint_duration_ms is not None and self.show_time:
+            sprint_remaining_ms = self.sprint_duration_ms
+            if self.first_input_at is not None:
+                elapsed_ms = int((monotonic() - self.first_input_at) * 1000)
+                sprint_remaining_ms = max(0, self.sprint_duration_ms - elapsed_ms)
+            status_parts.append(f"sprint {self._format_elapsed_time(sprint_remaining_ms)}")
+
+        title.update(" | ".join(status_parts))
 
     def _refresh_review(self) -> None:
         review = self.query_one("#review", ReviewTextArea)
         review.load_text(self._get_review_text())
+
+    def _get_prompt_text(self) -> str:
+        return f"Prompt: {self.prompt}" if self.prompt else ""
 
     def _get_review_text(self) -> str:
         parts = [*self.saved_blocks]
@@ -307,11 +365,12 @@ def main(argv: list[str] | None = None) -> None:
     should_emit_final_output = not sys.stdout.isatty()
     redirected_stdout_fd: int | None = None
     tty_stream = None
+    tty_path = "CONOUT$" if os.name == "nt" else "/dev/tty"
 
     if should_emit_final_output:
         try:
             redirected_stdout_fd = os.dup(sys.stdout.fileno())
-            tty_stream = open("/dev/tty", "w", encoding=sys.stdout.encoding or "utf-8")
+            tty_stream = open(tty_path, "w", encoding=sys.stdout.encoding or "utf-8")
             sys.stdout.flush()
             os.dup2(tty_stream.fileno(), sys.stdout.fileno())
         except OSError:
@@ -319,7 +378,13 @@ def main(argv: list[str] | None = None) -> None:
                 os.close(redirected_stdout_fd)
                 redirected_stdout_fd = None
 
-    app = TypeDontThinkTUI(no_review=args.no_review, delay_seconds=args.delay)
+    app = TypeDontThinkTUI(
+        no_review=args.no_review,
+        delay_seconds=args.delay,
+        sprint_minutes=args.sprint,
+        prompt=args.prompt,
+        show_time=args.show_time,
+    )
     app.run()
 
     if redirected_stdout_fd is not None:
