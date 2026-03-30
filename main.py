@@ -68,14 +68,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 class ReviewTextArea(TextArea):
     BINDINGS = [
-        ("enter", "restart_session", "Restart"),
+        ("r", "restart_session", "Restart"),
         ("c", "copy_session", "Copy"),
         ("j", "scroll_down", "Down"),
         ("k", "scroll_up", "Up"),
     ]
 
     async def _on_key(self, event: events.Key) -> None:
-        if event.key == "enter":
+        if event.key == "r":
             event.stop()
             event.prevent_default()
             self.app.restart_session()
