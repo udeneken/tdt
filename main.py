@@ -1,4 +1,6 @@
 import argparse
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 import os
 import subprocess
 import sys
@@ -34,6 +36,129 @@ def positive_int(value: str) -> int:
     if minutes <= 0:
         raise argparse.ArgumentTypeError("minutes must be greater than 0")
     return minutes
+
+
+@dataclass
+class SessionState:
+    delay_ms: int
+    sprint_duration_ms: int | None
+    saved_blocks: list[str] = field(default_factory=list)
+    current_text: str = ""
+    first_activity_at: float | None = None
+    last_activity_at: float | None = None
+    review_elapsed_ms: int = 0
+    in_review_mode: bool = False
+
+    def update_text(self, text: str) -> None:
+        self.current_text = text
+        if not text:
+            self.last_activity_at = None
+            return
+
+        now = monotonic()
+        if self.first_activity_at is None:
+            self.first_activity_at = now
+        self.last_activity_at = now
+
+    def commit_current_block(self) -> bool:
+        if not self.current_text.strip():
+            self.last_activity_at = None
+            return False
+
+        self.saved_blocks.append(self.current_text)
+        self.current_text = ""
+        self.last_activity_at = None
+        return True
+
+    def get_review_text(self) -> str:
+        parts = [*self.saved_blocks]
+        if self.current_text:
+            parts.append(self.current_text)
+        return "\n".join(parts)
+
+    def has_any_text(self) -> bool:
+        return bool(self.saved_blocks or self.current_text)
+
+    def word_count(self) -> int:
+        return len(self.get_review_text().split())
+
+    def elapsed_ms_since(self, timestamp: float | None) -> int | None:
+        if timestamp is None:
+            return None
+        return int((monotonic() - timestamp) * 1000)
+
+    def remaining_delay_ms(self) -> int:
+        if self.last_activity_at is None or not self.current_text.strip():
+            return self.delay_ms
+
+        elapsed_ms = self.elapsed_ms_since(self.last_activity_at)
+        assert elapsed_ms is not None
+        return max(0, self.delay_ms - elapsed_ms)
+
+    def remaining_sprint_ms(self) -> int | None:
+        if self.sprint_duration_ms is None:
+            return None
+        if self.first_activity_at is None:
+            return self.sprint_duration_ms
+
+        elapsed_ms = self.elapsed_ms_since(self.first_activity_at)
+        assert elapsed_ms is not None
+        return max(0, self.sprint_duration_ms - elapsed_ms)
+
+    def enter_review_mode(self) -> None:
+        elapsed_ms = self.elapsed_ms_since(self.first_activity_at)
+        self.review_elapsed_ms = elapsed_ms if elapsed_ms is not None else 0
+        self.in_review_mode = True
+
+    def reset(self, *, clear_saved_blocks: bool) -> None:
+        self.first_activity_at = None
+        self.last_activity_at = None
+        self.review_elapsed_ms = 0
+        self.current_text = ""
+        self.in_review_mode = False
+        if clear_saved_blocks:
+            self.saved_blocks.clear()
+
+
+@contextmanager
+def redirected_stdout_to_tty(enabled: bool):
+    redirected_stdout_fd: int | None = None
+    tty_stream = None
+    redirection_active = False
+    tty_path = "CONOUT$" if os.name == "nt" else "/dev/tty"
+
+    try:
+        if enabled:
+            try:
+                redirected_stdout_fd = os.dup(sys.stdout.fileno())
+                tty_stream = open(tty_path, "w", encoding=sys.stdout.encoding or "utf-8")
+                try:
+                    sys.stdout.flush()
+                except BrokenPipeError:
+                    _exit_on_broken_pipe()
+                os.dup2(tty_stream.fileno(), sys.stdout.fileno())
+                redirection_active = True
+            except OSError:
+                if redirected_stdout_fd is not None:
+                    os.close(redirected_stdout_fd)
+                    redirected_stdout_fd = None
+
+        yield redirection_active
+    finally:
+        if redirected_stdout_fd is not None:
+            try:
+                sys.stdout.flush()
+            except BrokenPipeError:
+                os.close(redirected_stdout_fd)
+                if tty_stream is not None:
+                    tty_stream.close()
+                _exit_on_broken_pipe()
+            os.dup2(redirected_stdout_fd, sys.stdout.fileno())
+            os.close(redirected_stdout_fd)
+            sys.stdout = os.fdopen(sys.stdout.fileno(), "w", encoding="utf-8", closefd=False)
+
+        if tty_stream is not None:
+            tty_stream.close()
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -169,24 +294,17 @@ class TypeDontThinkTUI(App[None]):
         super().__init__()
         self.no_review = no_review
         self.delay_seconds = delay_seconds
-        self.delay_ms = int(delay_seconds * 1000)
-        self.sprint_minutes = sprint_minutes
-        self.sprint_duration_ms = sprint_minutes * 60 * 1000 if sprint_minutes is not None else None
         self.prompt = prompt.strip() if prompt else ""
         self.show_time = show_time
+        self.session = SessionState(
+            delay_ms=int(delay_seconds * 1000),
+            sprint_duration_ms=sprint_minutes * 60 * 1000 if sprint_minutes is not None else None,
+        )
         if self.no_review:
             self._bindings = self._bindings.copy()
             self._bindings.key_to_bindings["escape"] = []
             self._bindings.bind("escape", "handle_escape", "Quit")
-        self.first_input_at: float | None = None
-        self.last_keypress_at: float | None = None
         self.final_output = ""
-        self.review_elapsed_ms = 0
-        self.saved_blocks: list[str] = []
-        self.current_text = ""
-        self.review_text = ""
-        self.review_word_count = 0
-        self.in_review_mode = False
         self._last_status_text = ""
         self.title_widget: Static | None = None
         self.editor: InputTextArea | None = None
@@ -209,24 +327,18 @@ class TypeDontThinkTUI(App[None]):
         self._refresh_status()
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
-        if event.text_area.id != "editor" or self.in_review_mode:
+        if event.text_area.id != "editor" or self.session.in_review_mode:
             return
 
-        self.current_text = event.text_area.text
-        if self.current_text:
-            if self.first_input_at is None:
-                self.first_input_at = monotonic()
-            self.last_keypress_at = monotonic()
-        else:
-            self.last_keypress_at = None
+        self.session.update_text(event.text_area.text)
         self._refresh_status()
 
     def action_handle_escape(self) -> None:
-        if self.in_review_mode:
+        if self.session.in_review_mode:
             self._exit_review_mode()
             return
 
-        if not self.saved_blocks and not self.current_text:
+        if not self.session.has_any_text():
             self.exit()
             return
 
@@ -237,10 +349,10 @@ class TypeDontThinkTUI(App[None]):
         self._enter_review_mode()
 
     def restart_session(self) -> None:
-        if not self.in_review_mode:
+        if not self.session.in_review_mode:
             return
 
-        self._reset_session_state(clear_saved_blocks=True)
+        self.session.reset(clear_saved_blocks=True)
         assert self.review is not None
         assert self.editor is not None
         self.review.load_text("")
@@ -251,7 +363,7 @@ class TypeDontThinkTUI(App[None]):
         self._refresh_status()
 
     def _tick(self) -> None:
-        if self.in_review_mode:
+        if self.session.in_review_mode:
             return
 
         self._end_sprint_if_needed()
@@ -260,7 +372,7 @@ class TypeDontThinkTUI(App[None]):
             self._refresh_status()
 
     def _end_sprint_if_needed(self) -> None:
-        sprint_remaining_ms = self._remaining_sprint_ms()
+        sprint_remaining_ms = self.session.remaining_sprint_ms()
         if sprint_remaining_ms is None:
             return
 
@@ -270,39 +382,33 @@ class TypeDontThinkTUI(App[None]):
         self.action_handle_escape()
 
     def _expire_input_if_needed(self) -> None:
-        if self.last_keypress_at is None or not self.current_text.strip():
+        if self.session.last_activity_at is None or not self.session.current_text.strip():
             return
 
-        if self._remaining_delay_ms() > 0:
+        if self.session.remaining_delay_ms() > 0:
             return
 
         self.commit_current_block()
 
     def commit_current_block(self) -> None:
-        if not self.current_text.strip():
-            self.last_keypress_at = None
+        if not self.session.commit_current_block():
             return
 
-        self.saved_blocks.append(self.current_text)
-        self.current_text = ""
-        self.last_keypress_at = None
-        self.review_text = ""
-        self.review_word_count = 0
         assert self.editor is not None
         self.editor.load_text("")
         self._refresh_status()
 
     def _refresh_status(self) -> None:
         status_text: str
-        if self.in_review_mode:
+        if self.session.in_review_mode:
             status_parts = ["Type Don't Think", "review"]
-            status_parts.append(self._format_elapsed_time(self.review_elapsed_ms))
-            status_parts.append(f"{self.review_word_count} words")
+            status_parts.append(self._format_elapsed_time(self.session.review_elapsed_ms))
+            status_parts.append(f"{self.session.word_count()} words")
             status_text = " | ".join(status_parts)
         else:
             status_parts = ["Type Don't Think", "input"]
             if self.show_time:
-                status_parts.append(f"{self._remaining_delay_ms() / 1000:.1f}s")
+                status_parts.append(f"{self.session.remaining_delay_ms() / 1000:.1f}s")
             sprint_progress = self._get_sprint_progress_text()
             if sprint_progress is not None:
                 status_parts.append(sprint_progress)
@@ -315,63 +421,29 @@ class TypeDontThinkTUI(App[None]):
         self.title_widget.update(status_text)
         self._last_status_text = status_text
 
-    def _refresh_sprint_progress(self) -> None:
-        self._refresh_status()
-
     def _get_sprint_progress_text(self) -> str | None:
-        if not self.show_time or self.in_review_mode or self.sprint_duration_ms is None:
+        if not self.show_time or self.session.in_review_mode or self.session.sprint_duration_ms is None:
             return None
 
         width = 24
-        if self.first_input_at is None:
-            remaining_ms = self.sprint_duration_ms
+        if self.session.first_activity_at is None:
+            remaining_ms = self.session.sprint_duration_ms
             completed = 0.0
         else:
-            remaining_ms = self._remaining_sprint_ms()
+            remaining_ms = self.session.remaining_sprint_ms()
             assert remaining_ms is not None
-            completed = 1 - (remaining_ms / self.sprint_duration_ms)
+            completed = 1 - (remaining_ms / self.session.sprint_duration_ms)
         completed = max(0.0, min(1.0, completed))
         filled = round(width * completed)
         bar = "#" * filled + "-" * (width - filled)
         return f"[{bar}] {self._format_elapsed_time(remaining_ms)}"
 
     def _refresh_review(self) -> None:
-        self.review_text = self._get_review_text()
-        self.review_word_count = self._get_word_count(self.review_text)
         assert self.review is not None
-        self.review.load_text(self.review_text)
+        self.review.load_text(self.session.get_review_text())
 
     def _get_prompt_text(self) -> str:
         return f"Prompt: {self.prompt}" if self.prompt else ""
-
-    def _get_review_text(self) -> str:
-        parts = [*self.saved_blocks]
-        if self.current_text:
-            parts.append(self.current_text)
-        return "\n".join(parts)
-
-    def _elapsed_ms_since(self, timestamp: float | None) -> int | None:
-        if timestamp is None:
-            return None
-        return int((monotonic() - timestamp) * 1000)
-
-    def _remaining_delay_ms(self) -> int:
-        if self.last_keypress_at is None or not self.current_text.strip():
-            return self.delay_ms
-
-        elapsed_ms = self._elapsed_ms_since(self.last_keypress_at)
-        assert elapsed_ms is not None
-        return max(0, self.delay_ms - elapsed_ms)
-
-    def _remaining_sprint_ms(self) -> int | None:
-        if self.sprint_duration_ms is None:
-            return None
-        if self.first_input_at is None:
-            return self.sprint_duration_ms
-
-        elapsed_ms = self._elapsed_ms_since(self.first_input_at)
-        assert elapsed_ms is not None
-        return max(0, self.sprint_duration_ms - elapsed_ms)
 
     def _format_elapsed_time(self, elapsed_ms: int) -> str:
         total_seconds = max(0, elapsed_ms // 1000)
@@ -381,24 +453,8 @@ class TypeDontThinkTUI(App[None]):
             return f"{hours}:{minutes:02d}:{seconds:02d}"
         return f"{minutes:02d}:{seconds:02d}"
 
-    def _get_word_count(self, text: str) -> int:
-        return len(text.split())
-
-    def _reset_session_state(self, *, clear_saved_blocks: bool) -> None:
-        self.first_input_at = None
-        self.last_keypress_at = None
-        self.review_elapsed_ms = 0
-        self.current_text = ""
-        self.review_text = ""
-        self.review_word_count = 0
-        self.in_review_mode = False
-        if clear_saved_blocks:
-            self.saved_blocks.clear()
-
     def _enter_review_mode(self) -> None:
-        elapsed_ms = self._elapsed_ms_since(self.first_input_at)
-        self.review_elapsed_ms = elapsed_ms if elapsed_ms is not None else 0
-        self.in_review_mode = True
+        self.session.enter_review_mode()
         self._refresh_review()
         assert self.editor is not None
         assert self.review is not None
@@ -408,15 +464,15 @@ class TypeDontThinkTUI(App[None]):
         self._refresh_status()
 
     def _exit_review_mode(self) -> None:
-        self.final_output = self.review_text or self._get_review_text()
+        self.final_output = self.session.get_review_text()
         self.exit()
 
     def _exit_without_review(self) -> None:
-        self.final_output = self._get_review_text()
+        self.final_output = self.session.get_review_text()
         self.exit()
 
     def copy_session_to_clipboard(self) -> None:
-        text = self._get_review_text()
+        text = self.session.get_review_text()
         if not text:
             return
 
@@ -432,26 +488,7 @@ class TypeDontThinkTUI(App[None]):
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-
     should_emit_final_output = not sys.stdout.isatty()
-    redirected_stdout_fd: int | None = None
-    tty_stream = None
-    tty_path = "CONOUT$" if os.name == "nt" else "/dev/tty"
-
-    if should_emit_final_output:
-        try:
-            redirected_stdout_fd = os.dup(sys.stdout.fileno())
-            tty_stream = open(tty_path, "w", encoding=sys.stdout.encoding or "utf-8")
-            try:
-                sys.stdout.flush()
-            except BrokenPipeError:
-                _exit_on_broken_pipe()
-            os.dup2(tty_stream.fileno(), sys.stdout.fileno())
-        except OSError:
-            if redirected_stdout_fd is not None:
-                os.close(redirected_stdout_fd)
-                redirected_stdout_fd = None
-
     app = TypeDontThinkTUI(
         no_review=args.no_review,
         delay_seconds=args.delay,
@@ -459,22 +496,9 @@ def main(argv: list[str] | None = None) -> None:
         prompt=args.prompt,
         show_time=args.show_time,
     )
-    app.run()
 
-    if redirected_stdout_fd is not None:
-        try:
-            sys.stdout.flush()
-        except BrokenPipeError:
-            os.close(redirected_stdout_fd)
-            if tty_stream is not None:
-                tty_stream.close()
-            _exit_on_broken_pipe()
-        os.dup2(redirected_stdout_fd, sys.stdout.fileno())
-        os.close(redirected_stdout_fd)
-        sys.stdout = os.fdopen(sys.stdout.fileno(), "w", encoding="utf-8", closefd=False)
-
-    if tty_stream is not None:
-        tty_stream.close()
+    with redirected_stdout_to_tty(should_emit_final_output):
+        app.run()
 
     if should_emit_final_output and app.final_output:
         try:
