@@ -14,6 +14,14 @@ DEFAULT_DELAY_SECONDS = 1.0
 CHECK_INTERVAL_MS = 100
 
 
+def _exit_on_broken_pipe() -> None:
+    try:
+        sys.stdout.close()
+    except OSError:
+        pass
+    raise SystemExit(141)
+
+
 def positive_float(value: str) -> float:
     delay = float(value)
     if delay <= 0:
@@ -295,9 +303,9 @@ class TypeDontThinkTUI(App[None]):
             status_parts = ["Type Don't Think", "input"]
             if self.show_time:
                 status_parts.append(f"{self._remaining_delay_ms() / 1000:.1f}s")
-                sprint_remaining_ms = self._remaining_sprint_ms()
-                if sprint_remaining_ms is not None:
-                    status_parts.append(f"sprint {self._format_elapsed_time(sprint_remaining_ms)}")
+            sprint_progress = self._get_sprint_progress_text()
+            if sprint_progress is not None:
+                status_parts.append(sprint_progress)
             status_text = " | ".join(status_parts)
 
         if status_text == self._last_status_text:
@@ -306,6 +314,26 @@ class TypeDontThinkTUI(App[None]):
         assert self.title_widget is not None
         self.title_widget.update(status_text)
         self._last_status_text = status_text
+
+    def _refresh_sprint_progress(self) -> None:
+        self._refresh_status()
+
+    def _get_sprint_progress_text(self) -> str | None:
+        if not self.show_time or self.in_review_mode or self.sprint_duration_ms is None:
+            return None
+
+        width = 24
+        if self.first_input_at is None:
+            remaining_ms = self.sprint_duration_ms
+            completed = 0.0
+        else:
+            remaining_ms = self._remaining_sprint_ms()
+            assert remaining_ms is not None
+            completed = 1 - (remaining_ms / self.sprint_duration_ms)
+        completed = max(0.0, min(1.0, completed))
+        filled = round(width * completed)
+        bar = "#" * filled + "-" * (width - filled)
+        return f"[{bar}] {self._format_elapsed_time(remaining_ms)}"
 
     def _refresh_review(self) -> None:
         self.review_text = self._get_review_text()
@@ -414,7 +442,10 @@ def main(argv: list[str] | None = None) -> None:
         try:
             redirected_stdout_fd = os.dup(sys.stdout.fileno())
             tty_stream = open(tty_path, "w", encoding=sys.stdout.encoding or "utf-8")
-            sys.stdout.flush()
+            try:
+                sys.stdout.flush()
+            except BrokenPipeError:
+                _exit_on_broken_pipe()
             os.dup2(tty_stream.fileno(), sys.stdout.fileno())
         except OSError:
             if redirected_stdout_fd is not None:
@@ -431,7 +462,13 @@ def main(argv: list[str] | None = None) -> None:
     app.run()
 
     if redirected_stdout_fd is not None:
-        sys.stdout.flush()
+        try:
+            sys.stdout.flush()
+        except BrokenPipeError:
+            os.close(redirected_stdout_fd)
+            if tty_stream is not None:
+                tty_stream.close()
+            _exit_on_broken_pipe()
         os.dup2(redirected_stdout_fd, sys.stdout.fileno())
         os.close(redirected_stdout_fd)
         sys.stdout = os.fdopen(sys.stdout.fileno(), "w", encoding="utf-8", closefd=False)
@@ -440,10 +477,13 @@ def main(argv: list[str] | None = None) -> None:
         tty_stream.close()
 
     if should_emit_final_output and app.final_output:
-        sys.stdout.write(app.final_output)
-        if not app.final_output.endswith("\n"):
-            sys.stdout.write("\n")
-        sys.stdout.flush()
+        try:
+            sys.stdout.write(app.final_output)
+            if not app.final_output.endswith("\n"):
+                sys.stdout.write("\n")
+            sys.stdout.flush()
+        except BrokenPipeError:
+            _exit_on_broken_pipe()
 
 
 if __name__ == "__main__":
