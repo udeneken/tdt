@@ -9,11 +9,13 @@ from time import monotonic
 from textual import events
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
+from textual.timer import Timer
 from textual.widgets import Footer, Static, TextArea
 
 
 DEFAULT_DELAY_SECONDS = 1.0
 CHECK_INTERVAL_MS = 100
+COPY_SELECTION_DURATION_SECONDS = 0.18
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -225,6 +227,11 @@ class ReviewTextArea(TextArea):
         ("k", "scroll_up", "Up"),
     ]
 
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self._copy_selection_timer: Timer | None = None
+        self._copy_selection_cursor: tuple[int, int] | None = None
+
     async def _on_key(self, event: events.Key) -> None:
         if event.key in {"r", "a"}:
             event.stop()
@@ -237,7 +244,31 @@ class ReviewTextArea(TextArea):
         await super()._on_key(event)
 
     def action_copy_session(self) -> None:
-        self.app.copy_session_to_clipboard()
+        if self.app.copy_session_to_clipboard():
+            self.animate_copy_selection()
+
+    def animate_copy_selection(self) -> None:
+        if not self.text:
+            return
+
+        if self._copy_selection_timer is None:
+            self._copy_selection_cursor = self.selection.end
+        else:
+            self._copy_selection_timer.stop()
+
+        self.select_all()
+        self._copy_selection_timer = self.set_timer(
+            COPY_SELECTION_DURATION_SECONDS,
+            self._clear_copy_selection,
+            name="copy-selection",
+        )
+
+    def _clear_copy_selection(self) -> None:
+        cursor = self._copy_selection_cursor
+        self._copy_selection_timer = None
+        self._copy_selection_cursor = None
+        if cursor is not None:
+            self.move_cursor(cursor, record_width=False)
 
     def action_append_session(self) -> None:
         self.app.append_session()
@@ -510,19 +541,20 @@ class TypeDontThinkTUI(App[None]):
         self.final_output = self.session.get_review_text()
         self.exit()
 
-    def copy_session_to_clipboard(self) -> None:
+    def copy_session_to_clipboard(self) -> bool:
         text = self.session.get_review_text()
         if not text:
-            return
+            return False
 
         if sys.platform == "darwin":
             try:
                 subprocess.run(["pbcopy"], input=text, text=True, check=True)
-                return
+                return True
             except (OSError, subprocess.SubprocessError):
                 pass
 
         self.copy_to_clipboard(text)
+        return True
 
 
 def main(argv: list[str] | None = None) -> None:
