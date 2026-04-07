@@ -10,8 +10,7 @@ After installing use `tdt --help` for some help.
 Install the `tdt` command into your terminal with [uv](https://docs.astral.sh/uv/).
 
 ```sh
-uv tool install .
-# uv tool uninstall tdt
+uv tool install git+https://github.com/udeneken/tdt
 ```
 
 **For Powershell:**
