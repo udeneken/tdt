@@ -16,6 +16,86 @@ DEFAULT_DELAY_SECONDS = 1.0
 CHECK_INTERVAL_MS = 100
 
 
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="tdt",
+        description="Write continuously or lose the current block after some time of inactivity.",
+    )
+    parser.add_argument(
+        "-d",
+        "--delay",
+        type=positive_float,
+        default=DEFAULT_DELAY_SECONDS,
+        help="Seconds of inactivity before the current block is deleted (default: 1.0).",
+    )
+    parser.add_argument(
+        "-n",
+        "--no-review",
+        action="store_true",
+        help="Exit immediately instead of entering review mode.",
+    )
+    parser.add_argument(
+        "-s",
+        "--sprint",
+        type=positive_int,
+        metavar="MINUTES",
+        help="End the session after the given number of minutes.",
+    )
+    parser.add_argument(
+        "-p",
+        "--prompt",
+        help="Show a writing prompt above the editor.",
+    )
+    parser.add_argument(
+        "-st",
+        "--show-time",
+        action="store_true",
+        help="Show timer information in the title bar.",
+    )
+    return parser.parse_args(argv)
+
+
+@contextmanager
+def redirected_stdout_to_tty(enabled: bool):
+    redirected_stdout_fd: int | None = None
+    tty_stream = None
+    redirection_active = False
+    tty_path = "CONOUT$" if os.name == "nt" else "/dev/tty"
+
+    try:
+        if enabled:
+            try:
+                redirected_stdout_fd = os.dup(sys.stdout.fileno())
+                tty_stream = open(tty_path, "w", encoding=sys.stdout.encoding or "utf-8")
+                try:
+                    sys.stdout.flush()
+                except BrokenPipeError:
+                    _exit_on_broken_pipe()
+                os.dup2(tty_stream.fileno(), sys.stdout.fileno())
+                redirection_active = True
+            except OSError:
+                if redirected_stdout_fd is not None:
+                    os.close(redirected_stdout_fd)
+                    redirected_stdout_fd = None
+
+        yield redirection_active
+    finally:
+        if redirected_stdout_fd is not None:
+            try:
+                sys.stdout.flush()
+            except BrokenPipeError:
+                os.close(redirected_stdout_fd)
+                if tty_stream is not None:
+                    tty_stream.close()
+                _exit_on_broken_pipe()
+            os.dup2(redirected_stdout_fd, sys.stdout.fileno())
+            os.close(redirected_stdout_fd)
+            sys.stdout = os.fdopen(sys.stdout.fileno(), "w", encoding="utf-8", closefd=False)
+
+        if tty_stream is not None:
+            tty_stream.close()
+
+
 def _exit_on_broken_pipe() -> None:
     try:
         sys.stdout.close()
@@ -74,7 +154,17 @@ class SessionState:
         parts = [*self.saved_blocks]
         if self.current_text:
             parts.append(self.current_text)
-        return "\n".join(parts)
+        while parts and not parts[-1]:
+            parts.pop()
+        text = ""
+        for part in parts:
+            if not text:
+                text = part
+            elif text.endswith("\n"):
+                text += part
+            else:
+                text += f"\n{part}"
+        return text
 
     def has_any_text(self) -> bool:
         return bool(self.saved_blocks or self.current_text)
@@ -119,104 +209,38 @@ class SessionState:
         if clear_saved_blocks:
             self.saved_blocks.clear()
 
-
-@contextmanager
-def redirected_stdout_to_tty(enabled: bool):
-    redirected_stdout_fd: int | None = None
-    tty_stream = None
-    redirection_active = False
-    tty_path = "CONOUT$" if os.name == "nt" else "/dev/tty"
-
-    try:
-        if enabled:
-            try:
-                redirected_stdout_fd = os.dup(sys.stdout.fileno())
-                tty_stream = open(tty_path, "w", encoding=sys.stdout.encoding or "utf-8")
-                try:
-                    sys.stdout.flush()
-                except BrokenPipeError:
-                    _exit_on_broken_pipe()
-                os.dup2(tty_stream.fileno(), sys.stdout.fileno())
-                redirection_active = True
-            except OSError:
-                if redirected_stdout_fd is not None:
-                    os.close(redirected_stdout_fd)
-                    redirected_stdout_fd = None
-
-        yield redirection_active
-    finally:
-        if redirected_stdout_fd is not None:
-            try:
-                sys.stdout.flush()
-            except BrokenPipeError:
-                os.close(redirected_stdout_fd)
-                if tty_stream is not None:
-                    tty_stream.close()
-                _exit_on_broken_pipe()
-            os.dup2(redirected_stdout_fd, sys.stdout.fileno())
-            os.close(redirected_stdout_fd)
-            sys.stdout = os.fdopen(sys.stdout.fileno(), "w", encoding="utf-8", closefd=False)
-
-        if tty_stream is not None:
-            tty_stream.close()
-
-
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        prog="tdt",
-        description="Write continuously or lose the current block after some time of inactivity.",
-    )
-    parser.add_argument(
-        "-d",
-        "--delay",
-        type=positive_float,
-        default=DEFAULT_DELAY_SECONDS,
-        help="Seconds of inactivity before the current block is deleted (default: 1.0).",
-    )
-    parser.add_argument(
-        "-n",
-        "--no-review",
-        action="store_true",
-        help="Exit immediately instead of entering review mode.",
-    )
-    parser.add_argument(
-        "-s",
-        "--sprint",
-        type=positive_int,
-        metavar="MINUTES",
-        help="End the session after the given number of minutes.",
-    )
-    parser.add_argument(
-        "-p",
-        "--prompt",
-        help="Show a writing prompt above the editor.",
-    )
-    parser.add_argument(
-        "--show-time",
-        action="store_true",
-        help="Show timer information in the title bar.",
-    )
-    return parser.parse_args(argv)
+    def start_append_session(self) -> None:
+        preserved_text = self.get_review_text()
+        self.reset(clear_saved_blocks=True)
+        if preserved_text:
+            self.saved_blocks.append(preserved_text)
 
 
 class ReviewTextArea(TextArea):
     BINDINGS = [
         ("r", "restart_session", "Restart"),
+        ("a", "append_session", "Append"),
         ("c", "copy_session", "Copy"),
         ("j", "scroll_down", "Down"),
         ("k", "scroll_up", "Up"),
     ]
 
     async def _on_key(self, event: events.Key) -> None:
-        if event.key == "r":
+        if event.key in {"r", "a"}:
             event.stop()
             event.prevent_default()
-            self.app.restart_session()
+            if event.key == "r":
+                self.app.restart_session()
+            else:
+                self.app.append_session()
             return
         await super()._on_key(event)
 
     def action_copy_session(self) -> None:
         self.app.copy_session_to_clipboard()
+
+    def action_append_session(self) -> None:
+        self.app.append_session()
 
     def action_scroll_down(self) -> None:
         self.scroll_relative(y=1)
@@ -271,6 +295,7 @@ class TypeDontThinkTUI(App[None]):
 
     #review {
         overflow: auto;
+        border: round green;
     }
 
     .hidden {
@@ -353,6 +378,20 @@ class TypeDontThinkTUI(App[None]):
             return
 
         self.session.reset(clear_saved_blocks=True)
+        assert self.review is not None
+        assert self.editor is not None
+        self.review.load_text("")
+        self.review.add_class("hidden")
+        self.editor.load_text("")
+        self.editor.remove_class("hidden")
+        self.editor.focus()
+        self._refresh_status()
+
+    def append_session(self) -> None:
+        if not self.session.in_review_mode:
+            return
+
+        self.session.start_append_session()
         assert self.review is not None
         assert self.editor is not None
         self.review.load_text("")
