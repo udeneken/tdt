@@ -9,6 +9,8 @@ After installing use `tdt --help` for some help.
 ## Install
 Install the `tdt` command into your terminal with [uv](https://docs.astral.sh/uv/).
 
+You don't have to clone the repo to run this.
+
 ```sh
 uv tool install git+https://github.com/udeneken/tdt
 ```
