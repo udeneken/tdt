@@ -36,13 +36,11 @@ tdt
 # tdt --show-time
 ```
 
-## Sprint And Prompt
+## Usage
 
 Use `--sprint MINUTES` to end the writing session automatically after a fixed writing sprint. The sprint countdown starts with your first input, not when the app opens. By default, countdown and elapsed time displays are hidden from the title bar while the underlying timers stay active. Use `--show-time` to make them visible.
 
 Use `--prompt TEXT` to show a writing prompt above the editor. The prompt is visible during the session but is not included in the exported review text.
-
-## Piping
 
 Pipe or redirect the final review text:
 
