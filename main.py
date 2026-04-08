@@ -54,6 +54,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Show timer information in the title bar.",
     )
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=output_path,
+        help="Save the final text to the given file. The parent folder must already exist.",
+    )
     return parser.parse_args(argv)
 
 
@@ -118,6 +124,22 @@ def positive_int(value: str) -> int:
     if minutes <= 0:
         raise argparse.ArgumentTypeError("minutes must be greater than 0")
     return minutes
+
+
+def output_path(value: str) -> str:
+    parent_dir = os.path.dirname(os.path.abspath(value)) or "."
+    if not os.path.isdir(parent_dir):
+        raise argparse.ArgumentTypeError(
+            f"output directory does not exist: {parent_dir}"
+        )
+    return value
+
+
+def write_output_file(path: str, text: str) -> None:
+    with open(path, "w", encoding="utf-8") as output_file:
+        output_file.write(text)
+        if text and not text.endswith("\n"):
+            output_file.write("\n")
 
 
 @dataclass
@@ -570,6 +592,9 @@ def main(argv: list[str] | None = None) -> None:
 
     with redirected_stdout_to_tty(should_emit_final_output):
         app.run()
+
+    if args.output and app.final_output:
+        write_output_file(args.output, app.final_output)
 
     if should_emit_final_output and app.final_output:
         try:
