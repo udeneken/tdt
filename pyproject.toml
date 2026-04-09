@@ -13,10 +13,10 @@ dependencies = [
 ]
 
 [project.scripts]
-tdt = "main:main"
+tdt = "tdt.main:main"
 
 [tool.hatch.build.targets.wheel]
-include = ["main.py"]
+packages = ["src/tdt"]
 
 [tool.hatch.build.targets.sdist]
-include = ["main.py", "README.md", "pyproject.toml"]
+include = ["src/tdt", "README.md", "pyproject.toml"]
