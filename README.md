@@ -29,11 +29,9 @@ After installing, you can launch it from anywhere with:
 ```sh
 tdt
 # tdt --no-review
-# tdt -d 2.5
-# tdt --sprint 10
-# tdt --prompt "Write the worst possible startup pitch"
 # tdt --sprint 10 --prompt "Describe the city at dawn"
-# tdt --show-time
+# tdt -s 5 --show-time
+# tdt --heljfp
 ```
 
 ## Usage
