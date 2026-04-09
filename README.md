@@ -31,7 +31,7 @@ tdt
 # tdt --no-review
 # tdt --sprint 10 --prompt "Describe the city at dawn"
 # tdt -s 5 --show-time
-# tdt --heljfp
+# tdt --help
 ```
 
 ## Usage
