@@ -11,13 +11,11 @@ After installing use `tdt --help` for some help.
 ## Install
 Install the `tdt` command into your terminal with [uv](https://docs.astral.sh/uv/).
 
-You don't have to clone the repo to run this.
-
 ```sh
 uv tool install git+https://github.com/udeneken/tdt
 ```
 
-**For Powershell:**
+**For Windows:**
 If `tdt` is not recognized after installation, the uv tool bin directory is not available in your current `PATH` yet.
 
 ```ps
