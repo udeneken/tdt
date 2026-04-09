@@ -551,8 +551,6 @@ class TypeDontThinkTUI(App[None]):
             status_text = " | ".join(status_parts)
         else:
             status_parts = ["Type Don't Think", "input"]
-            if self.show_time:
-                status_parts.append(f"{self.session.remaining_delay_ms() / 1000:.1f}s")
             sprint_progress = self._get_sprint_progress_text()
             if sprint_progress is not None:
                 status_parts.append(sprint_progress)
