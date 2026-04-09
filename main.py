@@ -24,29 +24,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Write continuously or lose the current block after some time of inactivity.",
     )
     parser.add_argument(
-        "-d",
-        "--delay",
-        type=positive_float,
-        default=DEFAULT_DELAY_SECONDS,
-        help="Seconds of inactivity before the current block is deleted (default: 1.0).",
-    )
-    parser.add_argument(
         "-n",
         "--no-review",
         action="store_true",
         help="Exit immediately instead of entering review mode.",
     )
     parser.add_argument(
+        "-p",
+        "--prompt",
+        help="Show a writing prompt above the editor.",
+    )
+    parser.add_argument(
         "-s",
         "--sprint",
-        type=positive_int,
+        type=positive_float,
         metavar="MINUTES",
         help="End the session after the given number of minutes.",
     )
     parser.add_argument(
-        "-p",
-        "--prompt",
-        help="Show a writing prompt above the editor.",
+        "-d",
+        "--delay",
+        type=positive_float,
+        default=DEFAULT_DELAY_SECONDS,
+        metavar="SECONDS",
+        help="Seconds of inactivity before the current block is deleted (default: 1 second).",
     )
     parser.add_argument(
         "-st",
@@ -58,7 +59,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "-o",
         "--output",
         type=output_path,
-        help="Save the final text to the given file. The parent folder must already exist.",
+        help="Save the final text to the given file.",
+    )
+    parser.add_argument(
+        "--dark",
+        action="store_true",
+        help="Use a dark background.",
     )
     return parser.parse_args(argv)
 
@@ -113,18 +119,10 @@ def _exit_on_broken_pipe() -> None:
 
 
 def positive_float(value: str) -> float:
-    delay = float(value)
-    if delay <= 0:
-        raise argparse.ArgumentTypeError("delay must be greater than 0")
-    return delay
-
-
-def positive_int(value: str) -> int:
-    minutes = int(value)
-    if minutes <= 0:
-        raise argparse.ArgumentTypeError("minutes must be greater than 0")
-    return minutes
-
+    val = float(value)
+    if val <= 0:
+        raise argparse.ArgumentTypeError("input must be greater than 0")
+    return val
 
 def output_path(value: str) -> str:
     parent_dir = os.path.dirname(os.path.abspath(value)) or "."
@@ -318,6 +316,8 @@ class TypeDontThinkTUI(App[None]):
         layout: vertical;
         width: 100%;
         height: 100%;
+        background: #f5f5f5;
+        color: black;
     }
 
     #root {
@@ -343,6 +343,8 @@ class TypeDontThinkTUI(App[None]):
     #review {
         width: 100%;
         height: 1fr;
+        background: #f5f5f5;
+        color: black;
         border: round $accent;
     }
 
@@ -353,6 +355,22 @@ class TypeDontThinkTUI(App[None]):
 
     .hidden {
         display: none;
+    }
+
+    .dark Screen {
+        background: #2f2f2f;
+        color: #f5f5f5;
+    }
+
+    .dark #prompt {
+        color: #d0d0d0;
+        background: #3a3a3a;
+    }
+
+    .dark #editor,
+    .dark #review {
+        background: #2f2f2f;
+        color: #f5f5f5;
     }
     """
 
@@ -368,12 +386,14 @@ class TypeDontThinkTUI(App[None]):
         sprint_minutes: int | None = None,
         prompt: str | None = None,
         show_time: bool = False,
+        dark: bool = False,
     ) -> None:
         super().__init__()
         self.no_review = no_review
         self.delay_seconds = delay_seconds
         self.prompt = prompt.strip() if prompt else ""
         self.show_time = show_time
+        self.dark = dark
         self.session = SessionState(
             delay_ms=int(delay_seconds * 1000),
             sprint_duration_ms=sprint_minutes * 60 * 1000 if sprint_minutes is not None else None,
@@ -397,6 +417,8 @@ class TypeDontThinkTUI(App[None]):
         yield Footer()
 
     def on_mount(self) -> None:
+        if self.dark:
+            self.add_class("dark")
         self.title_widget = self.query_one("#title", Static)
         self.editor = self.query_one("#editor", InputTextArea)
         self.review = self.query_one("#review", ReviewTextArea)
@@ -542,8 +564,8 @@ class TypeDontThinkTUI(App[None]):
         hours, remainder = divmod(total_seconds, 3600)
         minutes, seconds = divmod(remainder, 60)
         if hours:
-            return f"{hours}:{minutes:02d}:{seconds:02d}"
-        return f"{minutes:02d}:{seconds:02d}"
+            return f"{hours}:{minutes:02.0f}:{seconds:02.0f}"
+        return f"{minutes:02.0f}:{seconds:02.0f}"
 
     def _enter_review_mode(self) -> None:
         self.session.enter_review_mode()
@@ -588,6 +610,7 @@ def main(argv: list[str] | None = None) -> None:
         sprint_minutes=args.sprint,
         prompt=args.prompt,
         show_time=args.show_time,
+        dark=args.dark,
     )
 
     with redirected_stdout_to_tty(should_emit_final_output):
