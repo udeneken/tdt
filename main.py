@@ -9,6 +9,7 @@ from time import monotonic
 from textual import events
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
+from textual.document._document import Selection
 from textual.timer import Timer
 from textual.widgets import Footer, Static, TextArea
 
@@ -289,7 +290,7 @@ class ReviewTextArea(TextArea):
         self._copy_selection_timer = None
         self._copy_selection_cursor = None
         if cursor is not None:
-            self.move_cursor(cursor, record_width=False)
+            self.selection = Selection.cursor(cursor)
 
     def action_append_session(self) -> None:
         self.app.append_session()
@@ -419,7 +420,7 @@ class TypeDontThinkTUI(App[None]):
             yield Static("", id="title")
             yield Static(self._get_prompt_text(), id="prompt", classes="hidden" if not self.prompt else "")
             yield InputTextArea(id="editor")
-            yield ReviewTextArea("", id="review", read_only=True, classes="hidden")
+            yield ReviewTextArea("", id="review", read_only=True, show_cursor=False, classes="hidden")
         yield Footer()
 
     def on_mount(self) -> None:
