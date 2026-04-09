@@ -6,6 +6,8 @@ It is a writing tool with a single input area and a visible countdown. Your text
 
 After installing use `tdt --help` for some help.
 
+![demo](./media/tdt_demo.gif)
+
 ## Install
 Install the `tdt` command into your terminal with [uv](https://docs.astral.sh/uv/).
 
