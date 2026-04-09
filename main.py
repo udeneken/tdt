@@ -16,6 +16,7 @@ from textual.widgets import Footer, Static, TextArea
 DEFAULT_DELAY_SECONDS = 1.0
 CHECK_INTERVAL_MS = 100
 COPY_SELECTION_DURATION_SECONDS = 0.18
+TIMEOUT_SELECTION_DURATION_SECONDS = 0.18
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -372,6 +373,10 @@ class TypeDontThinkTUI(App[None]):
         background: #2f2f2f;
         color: #f5f5f5;
     }
+
+    #editor.timeout-selection .text-area--selection {
+        background: #f3c5c5;
+    }
     """
 
     BINDINGS = [
@@ -407,6 +412,7 @@ class TypeDontThinkTUI(App[None]):
         self.title_widget: Static | None = None
         self.editor: InputTextArea | None = None
         self.review: ReviewTextArea | None = None
+        self._timeout_selection_timer: Timer | None = None
 
     def compose(self) -> ComposeResult:
         with Vertical(id="root"):
@@ -496,21 +502,45 @@ class TypeDontThinkTUI(App[None]):
         self.action_handle_escape()
 
     def _expire_input_if_needed(self) -> None:
+        if self._timeout_selection_timer is not None:
+            return
+
         if self.session.last_activity_at is None or not self.session.current_text.strip():
             return
 
         if self.session.remaining_delay_ms() > 0:
             return
 
-        self.commit_current_block()
+        self._flash_timeout_selection()
 
-    def commit_current_block(self) -> None:
+    def commit_current_block(self) -> bool:
         if not self.session.commit_current_block():
-            return
+            return False
 
         assert self.editor is not None
         self.editor.load_text("")
         self._refresh_status()
+        return True
+
+    def _flash_timeout_selection(self) -> None:
+        assert self.editor is not None
+
+        self.editor.read_only = True
+        self.editor.add_class("timeout-selection")
+        self.editor.select_all()
+        self._timeout_selection_timer = self.set_timer(
+            TIMEOUT_SELECTION_DURATION_SECONDS,
+            self._commit_expired_block,
+            name="timeout-selection",
+        )
+
+    def _commit_expired_block(self) -> None:
+        assert self.editor is not None
+
+        self._timeout_selection_timer = None
+        self.editor.remove_class("timeout-selection")
+        self.editor.read_only = False
+        self.commit_current_block()
 
     def _refresh_status(self) -> None:
         status_text: str
