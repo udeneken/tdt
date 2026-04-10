@@ -2,6 +2,7 @@ import argparse
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 import os
+import shlex
 import subprocess
 import sys
 from time import monotonic
@@ -126,6 +127,7 @@ def positive_float(value: str) -> float:
         raise argparse.ArgumentTypeError("input must be greater than 0")
     return val
 
+
 def output_path(value: str) -> str:
     parent_dir = os.path.dirname(os.path.abspath(value)) or "."
     if not os.path.isdir(parent_dir):
@@ -245,6 +247,7 @@ class ReviewTextArea(TextArea):
         ("r", "restart_session", "Restart"),
         ("a", "append_session", "Append"),
         ("c", "copy_session", "Copy"),
+        ("e", "edit_session", "Edit"),
         ("j", "scroll_down", "Down"),
         ("k", "scroll_up", "Up"),
     ]
@@ -294,6 +297,9 @@ class ReviewTextArea(TextArea):
 
     def action_append_session(self) -> None:
         self.app.append_session()
+
+    def action_edit_session(self) -> None:
+        self.app.edit_session_in_editor()
 
     def action_scroll_down(self) -> None:
         self.scroll_relative(y=1)
@@ -409,7 +415,11 @@ class TypeDontThinkTUI(App[None]):
             self._bindings.key_to_bindings["escape"] = []
             self._bindings.bind("escape", "handle_escape", "Quit")
         self.final_output = ""
+        self.editor_command: list[str] | None = None
+        self.editor_input_text = ""
         self._last_status_text = ""
+        self._status_notice = ""
+        self._status_notice_timer: Timer | None = None
         self.title_widget: Static | None = None
         self.editor: InputTextArea | None = None
         self.review: ReviewTextArea | None = None
@@ -549,12 +559,16 @@ class TypeDontThinkTUI(App[None]):
             status_parts = ["Type Don't Think", "review"]
             status_parts.append(self._format_elapsed_time(self.session.review_elapsed_ms))
             status_parts.append(f"{self.session.word_count()} words")
+            if self._status_notice:
+                status_parts.append(self._status_notice)
             status_text = " | ".join(status_parts)
         else:
             status_parts = ["Type Don't Think", "input"]
             sprint_progress = self._get_sprint_progress_text()
             if sprint_progress is not None:
                 status_parts.append(sprint_progress)
+            if self._status_notice:
+                status_parts.append(self._status_notice)
             status_text = " | ".join(status_parts)
 
         if status_text == self._last_status_text:
@@ -614,6 +628,45 @@ class TypeDontThinkTUI(App[None]):
         self.final_output = self.session.get_review_text()
         self.exit()
 
+    def _show_status_notice(self, message: str, duration_seconds: float = 2.5) -> None:
+        self._status_notice = message
+        self._refresh_status()
+        if self._status_notice_timer is not None:
+            self._status_notice_timer.stop()
+        self._status_notice_timer = self.set_timer(
+            duration_seconds,
+            self._clear_status_notice,
+            name="status-notice",
+        )
+
+    def _clear_status_notice(self) -> None:
+        self._status_notice = ""
+        self._status_notice_timer = None
+        self._refresh_status()
+
+    def edit_session_in_editor(self) -> bool:
+        editor = os.environ.get("EDITOR")
+        if not editor:
+            self.bell()
+            self._show_status_notice("Set $EDITOR to use edit mode.")
+            return False
+
+        text = self.session.get_review_text()
+        if not text:
+            return False
+
+        editor_command = shlex.split(editor)
+        if not editor_command:
+            self.bell()
+            self._show_status_notice("Set $EDITOR to use edit mode.")
+            return False
+
+        self.editor_command = editor_command
+        self.editor_input_text = text
+        self.final_output = ""
+        self.exit()
+        return True
+
     def copy_session_to_clipboard(self) -> bool:
         text = self.session.get_review_text()
         if not text:
@@ -644,6 +697,29 @@ def main(argv: list[str] | None = None) -> None:
 
     with redirected_stdout_to_tty(should_emit_final_output):
         app.run()
+
+    if app.editor_command:
+        editor_command = [*app.editor_command]
+        if "-" not in editor_command[1:]:
+            editor_command.append("-")
+        try:
+            completed = subprocess.run(
+                editor_command,
+                input=app.editor_input_text,
+                text=True,
+                check=False,
+            )
+            if completed.returncode != 0:
+                sys.stderr.write(
+                    "tdt: failed to open $EDITOR with stdin. "
+                    "Set $EDITOR to a command that can read from stdin, for example "
+                    "'nvim -'.\n"
+                )
+                sys.stderr.flush()
+        except OSError:
+            sys.stderr.write("tdt: failed to launch $EDITOR.\n")
+            sys.stderr.flush()
+        return
 
     if args.output and app.final_output:
         write_output_file(args.output, app.final_output)
