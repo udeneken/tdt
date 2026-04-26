@@ -13,12 +13,15 @@ from textual.containers import Vertical
 from textual.document._document import Selection
 from textual.timer import Timer
 from textual.widgets import Footer, Static, TextArea
+from rich.text import Text
 
 
 DEFAULT_DELAY_SECONDS = 1.0
 CHECK_INTERVAL_MS = 100
 COPY_SELECTION_DURATION_SECONDS = 0.18
 TIMEOUT_SELECTION_DURATION_SECONDS = 0.18
+DEFAULT_STRESS_LEVEL = "mid"
+STRESS_LEVELS = ("none", "mid", "high")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -68,6 +71,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--dark",
         action="store_true",
         help="Use a dark background.",
+    )
+    parser.add_argument(
+        "--stress",
+        choices=STRESS_LEVELS,
+        default=DEFAULT_STRESS_LEVEL,
+        help=(
+            "Set timeout feedback: none hides text immediately, mid keeps the current "
+            "selection flash, high also tints text red during the last 20%% of the delay "
+            f"(default: {DEFAULT_STRESS_LEVEL})."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -242,6 +255,24 @@ class SessionState:
             self.saved_blocks.append(preserved_text)
 
 
+@dataclass(frozen=True)
+class AppConfig:
+    no_review: bool = False
+    delay_seconds: float = DEFAULT_DELAY_SECONDS
+    sprint_minutes: float | None = None
+    prompt: str | None = None
+    show_time: bool = False
+    dark: bool = False
+    stress: str = DEFAULT_STRESS_LEVEL
+
+
+@dataclass
+class AppResult:
+    final_output: str = ""
+    editor_command: list[str] | None = None
+    editor_input_text: str = ""
+
+
 class ReviewTextArea(TextArea):
     BINDINGS = [
         ("r", "restart_session", "Restart"),
@@ -384,40 +415,38 @@ class TypeDontThinkTUI(App[None]):
     #editor.timeout-selection .text-area--selection {
         background: #f3c5c5;
     }
+
+    #editor.stress-warning {
+        color: #8f3f3f;
+    }
+
+    .dark #editor.stress-warning {
+        color: #ffb0b0;
+    }
     """
 
     BINDINGS = [
         ("escape", "handle_escape", "Review / Quit"),
     ]
 
-    def __init__(
-        self,
-        *,
-        no_review: bool = False,
-        delay_seconds: float = DEFAULT_DELAY_SECONDS,
-        sprint_minutes: int | None = None,
-        prompt: str | None = None,
-        show_time: bool = False,
-        dark: bool = False,
-    ) -> None:
+    def __init__(self, config: AppConfig) -> None:
         super().__init__()
-        self.no_review = no_review
-        self.delay_seconds = delay_seconds
-        self.prompt = prompt.strip() if prompt else ""
-        self.show_time = show_time
-        self.dark = dark
+        self.config = config
+        self.prompt = config.prompt.strip() if config.prompt else ""
         self.session = SessionState(
-            delay_ms=int(delay_seconds * 1000),
-            sprint_duration_ms=sprint_minutes * 60 * 1000 if sprint_minutes is not None else None,
+            delay_ms=int(config.delay_seconds * 1000),
+            sprint_duration_ms=(
+                int(config.sprint_minutes * 60 * 1000)
+                if config.sprint_minutes is not None
+                else None
+            ),
         )
-        if self.no_review:
+        if self.config.no_review:
             self._bindings = self._bindings.copy()
             self._bindings.key_to_bindings["escape"] = []
             self._bindings.bind("escape", "handle_escape", "Quit")
-        self.final_output = ""
-        self.editor_command: list[str] | None = None
-        self.editor_input_text = ""
-        self._last_status_text = ""
+        self.result = AppResult()
+        self._last_status_text: object = ""
         self._status_notice = ""
         self._status_notice_timer: Timer | None = None
         self.title_widget: Static | None = None
@@ -434,7 +463,7 @@ class TypeDontThinkTUI(App[None]):
         yield Footer()
 
     def on_mount(self) -> None:
-        if self.dark:
+        if self.config.dark:
             self.add_class("dark")
         self.title_widget = self.query_one("#title", Static)
         self.editor = self.query_one("#editor", InputTextArea)
@@ -448,6 +477,7 @@ class TypeDontThinkTUI(App[None]):
             return
 
         self.session.update_text(event.text_area.text)
+        self._refresh_editor_stress_state()
         self._refresh_status()
 
     def action_handle_escape(self) -> None:
@@ -459,7 +489,7 @@ class TypeDontThinkTUI(App[None]):
             self.exit()
             return
 
-        if self.no_review:
+        if self.config.no_review:
             self._exit_without_review()
             return
 
@@ -498,8 +528,11 @@ class TypeDontThinkTUI(App[None]):
             return
 
         self._end_sprint_if_needed()
+        if self.session.in_review_mode:
+            return
+        self._refresh_editor_stress_state()
         self._expire_input_if_needed()
-        if self.show_time:
+        if self.config.show_time:
             self._refresh_status()
 
     def _end_sprint_if_needed(self) -> None:
@@ -522,6 +555,10 @@ class TypeDontThinkTUI(App[None]):
         if self.session.remaining_delay_ms() > 0:
             return
 
+        if self.config.stress == "none":
+            self.commit_current_block()
+            return
+
         self._flash_timeout_selection()
 
     def commit_current_block(self) -> bool:
@@ -530,12 +567,14 @@ class TypeDontThinkTUI(App[None]):
 
         assert self.editor is not None
         self.editor.load_text("")
+        self._refresh_editor_stress_state()
         self._refresh_status()
         return True
 
     def _flash_timeout_selection(self) -> None:
         assert self.editor is not None
 
+        self.editor.remove_class("stress-warning")
         self.editor.read_only = True
         self.editor.add_class("timeout-selection")
         self.editor.select_all()
@@ -553,8 +592,26 @@ class TypeDontThinkTUI(App[None]):
         self.editor.read_only = False
         self.commit_current_block()
 
+    def _refresh_editor_stress_state(self) -> None:
+        assert self.editor is not None
+
+        should_warn = False
+        if (
+            self.config.stress == "high"
+            and not self.session.in_review_mode
+            and self._timeout_selection_timer is None
+            and self.session.last_activity_at is not None
+            and self.session.current_text.strip()
+        ):
+            should_warn = self.session.remaining_delay_ms() <= self.session.delay_ms * 0.5
+
+        if should_warn:
+            self.editor.add_class("stress-warning")
+        else:
+            self.editor.remove_class("stress-warning")
+
     def _refresh_status(self) -> None:
-        status_text: str
+        status_text: str | Text
         if self.session.in_review_mode:
             status_parts = ["Type Don't Think", "review"]
             status_parts.append(self._format_elapsed_time(self.session.review_elapsed_ms))
@@ -563,23 +620,36 @@ class TypeDontThinkTUI(App[None]):
                 status_parts.append(self._status_notice)
             status_text = " | ".join(status_parts)
         else:
-            status_parts = ["Type Don't Think", "input"]
+            status_text = Text("Type Don't Think | input")
             sprint_progress = self._get_sprint_progress_text()
             if sprint_progress is not None:
-                status_parts.append(sprint_progress)
+                status_text.append(" | ")
+                status_text.append_text(sprint_progress)
             if self._status_notice:
-                status_parts.append(self._status_notice)
-            status_text = " | ".join(status_parts)
+                status_text.append(f" | {self._status_notice}")
 
-        if status_text == self._last_status_text:
+        status_signature = self._get_status_signature(status_text)
+        if status_signature == self._last_status_text:
             return
 
         assert self.title_widget is not None
         self.title_widget.update(status_text)
-        self._last_status_text = status_text
+        self._last_status_text = status_signature
 
-    def _get_sprint_progress_text(self) -> str | None:
-        if not self.show_time or self.session.in_review_mode or self.session.sprint_duration_ms is None:
+    def _get_status_signature(self, status_text: str | Text) -> object:
+        if isinstance(status_text, Text):
+            return (
+                status_text.plain,
+                tuple((span.start, span.end, str(span.style)) for span in status_text.spans),
+            )
+        return status_text
+
+    def _get_sprint_progress_text(self) -> Text | None:
+        if (
+            not self.config.show_time
+            or self.session.in_review_mode
+            or self.session.sprint_duration_ms is None
+        ):
             return None
 
         width = 24
@@ -592,8 +662,16 @@ class TypeDontThinkTUI(App[None]):
             completed = 1 - (remaining_ms / self.session.sprint_duration_ms)
         completed = max(0.0, min(1.0, completed))
         filled = round(width * completed)
-        bar = "#" * filled + "-" * (width - filled)
-        return f"[{bar}] {self._format_elapsed_time(remaining_ms)}"
+        warning_start = width - max(1, round(width * 0.2))
+        should_tint = self.config.stress == "high" and completed >= 0.8
+
+        progress = Text("[")
+        for index in range(width):
+            char = "#" if index < filled else "-"
+            style = "red" if should_tint and index >= warning_start else None
+            progress.append(char, style=style)
+        progress.append(f"] {self._format_elapsed_time(remaining_ms)}")
+        return progress
 
     def _refresh_review(self) -> None:
         assert self.review is not None
@@ -615,17 +693,19 @@ class TypeDontThinkTUI(App[None]):
         self._refresh_review()
         assert self.editor is not None
         assert self.review is not None
+        self.editor.remove_class("stress-warning")
+        self.editor.remove_class("timeout-selection")
         self.editor.add_class("hidden")
         self.review.remove_class("hidden")
         self.review.focus()
         self._refresh_status()
 
     def _exit_review_mode(self) -> None:
-        self.final_output = self.session.get_review_text()
+        self.result.final_output = self.session.get_review_text()
         self.exit()
 
     def _exit_without_review(self) -> None:
-        self.final_output = self.session.get_review_text()
+        self.result.final_output = self.session.get_review_text()
         self.exit()
 
     def _show_status_notice(self, message: str, duration_seconds: float = 2.5) -> None:
@@ -661,9 +741,9 @@ class TypeDontThinkTUI(App[None]):
             self._show_status_notice("Set $EDITOR to use edit mode.")
             return False
 
-        self.editor_command = editor_command
-        self.editor_input_text = text
-        self.final_output = ""
+        self.result.editor_command = editor_command
+        self.result.editor_input_text = text
+        self.result.final_output = ""
         self.exit()
         return True
 
@@ -686,26 +766,28 @@ class TypeDontThinkTUI(App[None]):
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     should_emit_final_output = not sys.stdout.isatty()
-    app = TypeDontThinkTUI(
+    config = AppConfig(
         no_review=args.no_review,
         delay_seconds=args.delay,
         sprint_minutes=args.sprint,
         prompt=args.prompt,
         show_time=args.show_time,
         dark=args.dark,
+        stress=args.stress,
     )
+    app = TypeDontThinkTUI(config)
 
     with redirected_stdout_to_tty(should_emit_final_output):
         app.run()
 
-    if app.editor_command:
-        editor_command = [*app.editor_command]
+    if app.result.editor_command:
+        editor_command = [*app.result.editor_command]
         if "-" not in editor_command[1:]:
             editor_command.append("-")
         try:
             completed = subprocess.run(
                 editor_command,
-                input=app.editor_input_text,
+                input=app.result.editor_input_text,
                 text=True,
                 check=False,
             )
@@ -721,13 +803,13 @@ def main(argv: list[str] | None = None) -> None:
             sys.stderr.flush()
         return
 
-    if args.output and app.final_output:
-        write_output_file(args.output, app.final_output)
+    if args.output and app.result.final_output:
+        write_output_file(args.output, app.result.final_output)
 
-    if should_emit_final_output and app.final_output:
+    if should_emit_final_output and app.result.final_output:
         try:
-            sys.stdout.write(app.final_output)
-            if not app.final_output.endswith("\n"):
+            sys.stdout.write(app.result.final_output)
+            if not app.result.final_output.endswith("\n"):
                 sys.stdout.write("\n")
             sys.stdout.flush()
         except BrokenPipeError:
