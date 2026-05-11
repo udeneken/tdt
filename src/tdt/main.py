@@ -2,6 +2,7 @@ import argparse
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -22,6 +23,7 @@ COPY_SELECTION_DURATION_SECONDS = 0.18
 TIMEOUT_SELECTION_DURATION_SECONDS = 0.18
 DEFAULT_STRESS_LEVEL = "mid"
 STRESS_LEVELS = ("none", "mid", "high")
+FOCUSED_WORD_PATTERN = re.compile(r"\w+")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -60,6 +62,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--show-time",
         action="store_true",
         help="Show timer information in the title bar.",
+    )
+    parser.add_argument(
+        "-f",
+        "--focus",
+        action="store_true",
+        help="Use focused reading by bolding completed word starts.",
     )
     parser.add_argument(
         "-o",
@@ -155,6 +163,34 @@ def write_output_file(path: str, text: str) -> None:
         output_file.write(text)
         if text and not text.endswith("\n"):
             output_file.write("\n")
+
+
+def apply_focused_reading(line: Text, *, completed_words_only: bool = False) -> Text:
+    for match in FOCUSED_WORD_PATTERN.finditer(line.plain):
+        if completed_words_only and not _is_completed_word(line.plain, match.end()):
+            continue
+
+        prefix_length = get_focused_prefix_length(match.group())
+        line.stylize("bold", match.start(), match.start() + prefix_length)
+    return line
+
+
+def _is_completed_word(text: str, word_end: int) -> bool:
+    if word_end >= len(text):
+        return False
+
+    next_word = FOCUSED_WORD_PATTERN.search(text, word_end)
+    boundary_text = text[word_end : next_word.start() if next_word else len(text)]
+    return any(char.isspace() for char in boundary_text)
+
+
+def get_focused_prefix_length(word: str) -> int:
+    word_length = len(word)
+    if word_length <= 3:
+        return 1
+    if word_length <= 5:
+        return 2
+    return 3
 
 
 @dataclass
@@ -264,6 +300,7 @@ class AppConfig:
     show_time: bool = False
     dark: bool = False
     stress: str = DEFAULT_STRESS_LEVEL
+    focus: bool = False
 
 
 @dataclass
@@ -283,10 +320,20 @@ class ReviewTextArea(TextArea):
         ("k", "scroll_up", "Up"),
     ]
 
-    def __init__(self, *args: object, **kwargs: object) -> None:
+    def __init__(
+        self, *args: object, focused_reading: bool = False, **kwargs: object
+    ) -> None:
         super().__init__(*args, **kwargs)
+        self.focused_reading = focused_reading
         self._copy_selection_timer: Timer | None = None
         self._copy_selection_cursor: tuple[int, int] | None = None
+
+    def get_line(self, line_index: int) -> Text:
+        line = super().get_line(line_index)
+        if not self.focused_reading:
+            return line
+
+        return apply_focused_reading(line)
 
     async def _on_key(self, event: events.Key) -> None:
         if event.key in {"r", "a"}:
@@ -340,6 +387,19 @@ class ReviewTextArea(TextArea):
 
 
 class InputTextArea(TextArea):
+    def __init__(
+        self, *args: object, focused_reading: bool = False, **kwargs: object
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.focused_reading = focused_reading
+
+    def get_line(self, line_index: int) -> Text:
+        line = super().get_line(line_index)
+        if not self.focused_reading:
+            return line
+
+        return apply_focused_reading(line, completed_words_only=True)
+
     async def _on_key(self, event: events.Key) -> None:
         if event.key == "enter":
             event.stop()
@@ -458,8 +518,15 @@ class TypeDontThinkTUI(App[None]):
         with Vertical(id="root"):
             yield Static("", id="title")
             yield Static(self._get_prompt_text(), id="prompt", classes="hidden" if not self.prompt else "")
-            yield InputTextArea(id="editor")
-            yield ReviewTextArea("", id="review", read_only=True, show_cursor=False, classes="hidden")
+            yield InputTextArea(id="editor", focused_reading=self.config.focus)
+            yield ReviewTextArea(
+                "",
+                id="review",
+                read_only=True,
+                show_cursor=False,
+                classes="hidden",
+                focused_reading=self.config.focus,
+            )
         yield Footer()
 
     def on_mount(self) -> None:
@@ -774,6 +841,7 @@ def main(argv: list[str] | None = None) -> None:
         show_time=args.show_time,
         dark=args.dark,
         stress=args.stress,
+        focus=args.focus,
     )
     app = TypeDontThinkTUI(config)
 

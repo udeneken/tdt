@@ -44,6 +44,8 @@ Use `--prompt TEXT` to show a writing prompt above the editor. The prompt is vis
 
 Use `--stress none|mid|high` to control how timeout pressure is shown. `mid` is the default behavior, `none` removes the red selection flash and hides expired text immediately, and `high` adds a slight red tint during the last 20% of the delay.
 
+Use `-f` or `--focus` to enable focused reading, which bolds the first few characters of words without changing copied, edited, saved, or piped text. 
+
 In review mode, `e` exits `tdt` and sends the full review text to `$EDITOR` over stdin. If your editor needs an explicit stdin argument, include it in `$EDITOR`, for example:
 
 ```sh
