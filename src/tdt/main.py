@@ -543,8 +543,15 @@ class TypeDontThinkTUI(App[None]):
         if event.text_area.id != "editor" or self.session.in_review_mode:
             return
 
+        was_waiting_to_start_sprint = (
+            self.session.sprint_duration_ms is not None
+            and self.session.first_activity_at is None
+        )
         self.session.update_text(event.text_area.text)
         self._refresh_editor_stress_state()
+        if was_waiting_to_start_sprint and self.session.first_activity_at is not None:
+            self._show_hidden_timer_started_notice()
+            return
         self._refresh_status()
 
     def action_handle_escape(self) -> None:
@@ -743,6 +750,14 @@ class TypeDontThinkTUI(App[None]):
     def _refresh_review(self) -> None:
         assert self.review is not None
         self.review.load_text(self.session.get_review_text())
+
+    def _show_hidden_timer_started_notice(self) -> None:
+        if self.config.show_time or self.session.sprint_duration_ms is None:
+            self._refresh_status()
+            return
+
+        timer_text = self._format_elapsed_time(self.session.sprint_duration_ms)
+        self._show_status_notice(f"{timer_text} timer started")
 
     def _get_prompt_text(self) -> str:
         return f"Prompt: {self.prompt}" if self.prompt else ""
